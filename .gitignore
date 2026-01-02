@@ -16,3 +16,7 @@ yarn-error.log
 # OS
 .DS_Store
 Thumbs.db 
+
+# GS script
+*.gs
+postman
