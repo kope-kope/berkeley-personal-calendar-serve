@@ -19,4 +19,15 @@ Thumbs.db
 
 # GS script
 *.gs
-postman
+postman/
+
+# Ngrok (temporary development files)
+ngrok.yml
+NGROK_SETUP.md
+
+# Logs
+*.log
+/tmp/
+
+# Vercel
+.vercel

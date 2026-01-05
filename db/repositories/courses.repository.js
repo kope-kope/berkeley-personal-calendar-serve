@@ -235,13 +235,133 @@ async function deleteCoursesNotInList(coursesData, semester) {
   }
 }
 
+/**
+ * Normalize course number format for matching
+ * Converts dots to hyphens (e.g., "MBA210B.1" -> "MBA210B-1")
+ * @param {string} courseNo - Course number to normalize
+ * @returns {string} Normalized course number
+ */
+function normalizeCourseNumber(courseNo) {
+  if (!courseNo) return courseNo;
+  // Replace dots with hyphens in the section part (e.g., MBA210B.1 -> MBA210B-1)
+  return courseNo.replace(/\.(\d+[A-Z]?)$/, '-$1').trim();
+}
+
+/**
+ * Match extracted course numbers against database
+ * Performs exact match on course_no field (format: MBA210B-1)
+ * Normalizes extracted course numbers (converts dots to hyphens)
+ * @param {Array<string>} courseNumbers - Array of course numbers to match (e.g., ["MBA210B.1", "MBA212A.2"])
+ * @param {string} semester - Optional semester filter
+ * @returns {Promise<Object>} Object with matched courses and unmatched course numbers
+ */
+async function matchCoursesByNumbers(courseNumbers, semester = null) {
+  try {
+    if (!courseNumbers || courseNumbers.length === 0) {
+      return { 
+        success: true, 
+        data: { 
+          matched: [], 
+          unmatched: [],
+          matchCount: 0,
+          unmatchedCount: 0
+        }
+      };
+    }
+
+    // Clean, normalize, and dedupe course numbers
+    // Normalize format: convert dots to hyphens (MBA210B.1 -> MBA210B-1)
+    const normalizedNumbers = courseNumbers.map(cn => normalizeCourseNumber(cn?.trim())).filter(Boolean);
+    const cleanedNumbers = [...new Set(normalizedNumbers)];
+    
+    console.log(`Matching ${cleanedNumbers.length} course numbers against database...`);
+    console.log('Normalized course numbers to match:', cleanedNumbers);
+
+    // Build query - using course_no (database format: MBA210B-1)
+    let query = supabase
+      .from('courses')
+      .select('*')
+      .in('course_no', cleanedNumbers);
+    
+    // Add semester filter if provided
+    if (semester) {
+      query = query.eq('semester', semester);
+    }
+
+    const { data: matchedCourses, error } = await query;
+
+    if (error) {
+      console.error('Database query error:', error.message);
+      throw error;
+    }
+
+    // Create a map of matched course numbers for lookup
+    const matchedNumbers = new Set((matchedCourses || []).map(c => c.course_no));
+    
+    // Find unmatched course numbers (using normalized versions)
+    const unmatchedNumbers = cleanedNumbers.filter(cn => !matchedNumbers.has(cn));
+
+    console.log(`Match results: ${matchedCourses?.length || 0} matched, ${unmatchedNumbers.length} unmatched`);
+    if (matchedCourses && matchedCourses.length > 0) {
+      console.log('Matched courses:', matchedCourses.map(c => ({ 
+        course_no: c.course_no, 
+        title: c.course_title,
+        location: c.location,
+        start_date: c.start_date,
+        end_date: c.end_date
+      })));
+    }
+    if (unmatchedNumbers.length > 0) {
+      console.log('Unmatched course numbers:', unmatchedNumbers);
+      console.log('These courses are not in the database. Make sure they have been synced from Google Sheets.');
+    }
+
+    return {
+      success: true,
+      data: {
+        matched: matchedCourses || [],
+        unmatched: unmatchedNumbers,
+        matchCount: matchedCourses?.length || 0,
+        unmatchedCount: unmatchedNumbers.length
+      }
+    };
+  } catch (error) {
+    console.error('Error in matchCoursesByNumbers:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get a single course by course number (exact match)
+ * @param {string} courseNo - Course number to find
+ * @returns {Promise<Object>} Course object or null
+ */
+async function getCourseByNumber(courseNo) {
+  try {
+    const { data: course, error } = await supabase
+      .from('courses')
+      .select('*')
+      .eq('course_no', courseNo)
+      .maybeSingle();
+
+    if (error) throw error;
+    
+    return { success: true, data: course };
+  } catch (error) {
+    console.error('Error in getCourseByNumber:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 module.exports = {
   getCourseByCode,
+  getCourseByNumber,
   createCourse,
   searchCourses,
   getCoursesBySemester,
   updateCourse,
   batchUpsertCourses,
-  deleteCoursesNotInList
+  deleteCoursesNotInList,
+  matchCoursesByNumbers
 };
 
