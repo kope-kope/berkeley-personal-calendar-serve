@@ -25,3 +25,6 @@ COMMENT ON COLUMN users.google_calendar_connected_at IS 'Timestamp when calendar
 -- Migration Complete!
 -- ============================================
 
+
+
+

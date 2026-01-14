@@ -35,7 +35,27 @@ const upload = multer({
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Middleware
-app.use(cors());
+// CORS configuration to allow specific origins
+const allowedOrigins = [
+  'http://localhost:3002', // Local dev frontend
+  process.env.FRONTEND_URL, // Production frontend from Vercel
+  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null, // Vercel preview deployments
+].filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || 
+        process.env.NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // Mount routes
@@ -139,9 +159,13 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
     const base64Image = `data:${req.file.mimetype};base64,${imageBuffer.toString('base64')}`;
 
     const prompt = `
-      Extract the table of courses from this image. 
+      Extract the table of courses from this schedule image.
       Return a JSON array with fields: courseNo, courseTitle, instructor, days, times.
       Only include actual course rows, skip headers and section titles.
+      
+      IMPORTANT: Preserve the exact course code format as shown in the image.
+      Course codes may appear in various formats (e.g., "MBA296.90T", "MBA210B.1", "MBA212A-2").
+      Do NOT modify the course code format - extract it exactly as it appears.
       
       For the days field:
       - Convert abbreviations to full day names
@@ -159,6 +183,12 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
       - "M" should be ["Monday"]
       
       Format the times as a string in 24-hour format (e.g., "14:00-15:30").
+      
+      Example response format:
+      [
+        {"courseNo": "MBA296.90T", "courseTitle": "Course Title", "instructor": "Instructor Name", "days": ["Monday", "Wednesday"], "times": "14:00-15:30"},
+        {"courseNo": "MBA210B.1", "courseTitle": "Another Course", "instructor": "Another Instructor", "days": ["Tuesday", "Thursday"], "times": "09:00-10:30"}
+      ]
     `;
 
     const response = await openai.chat.completions.create({
@@ -184,7 +214,6 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
     let courses = [];
     let processedCourses = [];
     let matchResult = { success: false, data: { matchCount: 0, unmatchedCount: 0, unmatched: [] } };
-    let extractionId = null; // Store extraction ID for later updates
     
     try {
       // Try to parse JSON from the response
@@ -201,27 +230,8 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
       // Log the parsed courses data
       console.log('Parsed courses data:', JSON.stringify(courses, null, 2));
       
-      // Save raw OpenAI extraction to database immediately (only if user is provided)
-      if (user) {
-        const rawExtractionResult = await extractionsRepo.saveExtraction(
-          user.id,
-          { 
-            rawOpenAIResponse: courses, // Save the raw extraction from OpenAI
-            openAITextResponse: text, // Also save the raw text response
-            timestamp: new Date().toISOString()
-          },
-          'success',
-          null,
-          null
-        );
-
-        if (!rawExtractionResult.success) {
-          console.error('Failed to save raw extraction history:', rawExtractionResult.error);
-        } else {
-          extractionId = rawExtractionResult.data?.id;
-          console.log('✓ Saved raw OpenAI extraction to database');
-        }
-      }
+      // Note: Extraction history will be saved after matching and processing
+      // (saved below with the final processed courses)
 
       // Match extracted courses against database
       const courseNumbers = courses.map(c => c.courseNo).filter(Boolean);
@@ -235,10 +245,18 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
         });
       }
 
-      // Helper to normalize course number (convert dots to hyphens for lookup)
+      // Helper to normalize course number (convert dots to hyphens for database lookup)
+      // Handles various formats from different schedule sources:
+      // - "MBA296.90T" -> "MBA296-90T" (non-OLR format with letters after section number)
+      // - "MBA210B.1" -> "MBA210B-1" (standard OLR format)
+      // - "MBA212A.2" -> "MBA212A-2"
+      // This normalizes the format to match our database format (which uses hyphens)
       const normalizeCourseNo = (courseNo) => {
         if (!courseNo) return courseNo;
-        return courseNo.replace(/\.(\d+[A-Z]?)$/, '-$1').trim();
+        // Convert dots to hyphens for section numbers
+        // Pattern matches: .digits, .digits+letters (e.g., .90T, .1, .2A)
+        // This handles both OLR format (MBA210B.1) and non-OLR formats (MBA296.90T)
+        return courseNo.replace(/\.(\d+[A-Z]*)$/, '-$1').trim();
       };
 
       // Helper to convert day abbreviations to full day names array
@@ -308,43 +326,56 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
       // Process each extracted course and enrich with database data
       for (const course of courses) {
         try {
+          // Extract courseNo from either format (string or object)
+          const courseNo = typeof course === 'string' ? course : (course.courseNo || course);
+          if (!courseNo) continue;
+          
           // Normalize the extracted courseNo to match database format (MBA210B.1 -> MBA210B-1)
-          const normalizedCourseNo = normalizeCourseNo(course.courseNo);
+          const normalizedCourseNo = normalizeCourseNo(courseNo);
           const dbCourse = matchedCoursesMap[normalizedCourseNo];
           
           if (dbCourse) {
             // Convert database days (e.g., "MW") to array of full day names (e.g., ["Monday", "Wednesday"])
             const dbDaysArray = convertDaysToArray(dbCourse.days);
             
-            // Course matched - merge extracted data with database data
+            // Course matched - use database data as source of truth
             processedCourses.push({
-              ...course,
+              courseNo: courseNo, // Keep original format
               matched: true,
               dbCourseId: dbCourse.id,
-              // Enrich with database data (use DB data as source of truth for calendar events)
+              // All data comes from database
+              courseTitle: dbCourse.course_title,
               location: dbCourse.location || 'Room TBD',
               startDate: dbCourse.start_date,
               endDate: dbCourse.end_date,
-              days: dbDaysArray.length > 0 ? dbDaysArray : (course.days || []), // Convert DB days to array, fallback to extracted
-              times: dbCourse.time || course.times, // Prefer DB time, fallback to extracted
-              instructor: dbCourse.instructor || course.instructor, // Prefer DB instructor
+              days: dbDaysArray, // Convert DB days to array
+              times: dbCourse.time,
+              instructor: dbCourse.instructor,
               dbDays: dbCourse.days, // Keep original DB format for reference
               dbTime: dbCourse.time,
               dbInstructor: dbCourse.instructor,
               semester: dbCourse.semester,
               units: dbCourse.units,
-              notes: dbCourse.notes,
-              courseTitle: dbCourse.course_title || course.courseTitle // Prefer DB title
+              notes: dbCourse.notes
             });
           } else {
-            // Course not matched - use extracted data only (days should already be array from OpenAI)
+            // Course not matched - use extracted data as fallback
+            // Convert extracted days to array if needed
+            const extractedDays = Array.isArray(course.days) ? course.days : convertDaysToArray(course.days || '');
+            
             processedCourses.push({
-              ...course,
+              courseNo: courseNo, // Keep original format (with dots)
               matched: false,
               dbCourseId: null,
-              location: 'Room TBD',
-              startDate: null,
-              endDate: null
+              // Use extracted data as fallback (since course not in database)
+              courseTitle: course.courseTitle || null,
+              location: course.location || 'Room TBD',
+              startDate: course.startDate || null,
+              endDate: course.endDate || null,
+              days: extractedDays,
+              times: course.times || null,
+              instructor: course.instructor || null,
+              warning: `Course "${courseNo}" not found in database. Showing extracted data from image. Normalized format (${normalizedCourseNo}) may need to be synced from Google Sheets.`
             });
           }
         } catch (courseError) {

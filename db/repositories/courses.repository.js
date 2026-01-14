@@ -237,14 +237,20 @@ async function deleteCoursesNotInList(coursesData, semester) {
 
 /**
  * Normalize course number format for matching
- * Converts dots to hyphens (e.g., "MBA210B.1" -> "MBA210B-1")
+ * Converts dots to hyphens for database lookup
+ * Handles various formats:
+ * - "MBA296.90T" -> "MBA296-90T" (non-OLR format with letters after section number)
+ * - "MBA210B.1" -> "MBA210B-1" (standard OLR format)
+ * - "MBA212A.2" -> "MBA212A-2"
  * @param {string} courseNo - Course number to normalize
  * @returns {string} Normalized course number
  */
 function normalizeCourseNumber(courseNo) {
   if (!courseNo) return courseNo;
-  // Replace dots with hyphens in the section part (e.g., MBA210B.1 -> MBA210B-1)
-  return courseNo.replace(/\.(\d+[A-Z]?)$/, '-$1').trim();
+  // Replace dots with hyphens in the section part
+  // Pattern matches: .digits, .digits+letters (e.g., .90T, .1, .2A, .90AB)
+  // This handles both OLR format (MBA210B.1) and non-OLR formats (MBA296.90T)
+  return courseNo.replace(/\.(\d+[A-Z]*)$/, '-$1').trim();
 }
 
 /**

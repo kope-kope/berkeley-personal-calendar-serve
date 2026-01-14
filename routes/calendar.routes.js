@@ -1,5 +1,6 @@
 const express = require('express');
 const calendarService = require('../services/google-calendar.service');
+const gmailService = require('../services/gmail.service');
 const usersRepo = require('../db/repositories/users.repository');
 const { supabase } = require('../db/client');
 
@@ -90,6 +91,38 @@ router.post('/events', async (req, res) => {
       }
     }
 
+    // Send confirmation email after events are successfully created
+    if (result.success && result.totalCreated > 0) {
+      try {
+        // Generate email content
+        const emailContent = gmailService.generateCalendarEventsEmail(
+          email,
+          result.created.map(created => ({
+            courseNo: created.courseNo,
+            courseData: validCourses.find(c => c.courseNo === created.courseNo)
+          })),
+          result.calendarName || 'Spring 2026 schedule',
+          result.calendarUrl || ''
+        );
+
+        // Send email asynchronously (don't block response)
+        gmailService.sendEmail(email, emailContent.subject, emailContent.htmlBody, true)
+          .then(emailResult => {
+            if (emailResult.success) {
+              console.log(`Confirmation email sent successfully to ${email}`);
+            } else {
+              console.error(`Failed to send confirmation email to ${email}:`, emailResult.error);
+            }
+          })
+          .catch(emailError => {
+            console.error(`Error sending confirmation email to ${email}:`, emailError);
+          });
+      } catch (emailError) {
+        // Log error but don't fail the request
+        console.error('Error preparing email:', emailError);
+      }
+    }
+
     res.json({
       success: result.success,
       message: result.success 
@@ -98,7 +131,10 @@ router.post('/events', async (req, res) => {
       created: result.created,
       failed: result.failed,
       totalCreated: result.totalCreated,
-      totalFailed: result.totalFailed
+      totalFailed: result.totalFailed,
+      calendarId: result.calendarId,
+      calendarName: result.calendarName,
+      calendarUrl: result.calendarUrl
     });
 
   } catch (error) {

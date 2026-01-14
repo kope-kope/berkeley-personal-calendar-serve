@@ -206,7 +206,13 @@ async function getOrCreateCalendar(email, calendarName) {
       
       if (existingCalendar) {
         console.log(`Found existing calendar: ${calendarName} (${existingCalendar.id})`);
-        return { success: true, calendarId: existingCalendar.id };
+        // Construct Google Calendar URL
+        const calendarUrl = `https://calendar.google.com/calendar/u/0/r?cid=${encodeURIComponent(existingCalendar.id)}`;
+        return { 
+          success: true, 
+          calendarId: existingCalendar.id,
+          calendarUrl: calendarUrl
+        };
       }
     }
 
@@ -221,7 +227,13 @@ async function getOrCreateCalendar(email, calendarName) {
     });
 
     console.log(`Created calendar: ${calendarName} (${newCalendar.data.id})`);
-    return { success: true, calendarId: newCalendar.data.id };
+    // Construct Google Calendar URL
+    const calendarUrl = `https://calendar.google.com/calendar/u/0/r?cid=${encodeURIComponent(newCalendar.data.id)}`;
+    return { 
+      success: true, 
+      calendarId: newCalendar.data.id,
+      calendarUrl: calendarUrl
+    };
 
   } catch (error) {
     console.error('Error getting/creating calendar:', error);
@@ -350,7 +362,8 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
     totalCreated: 0,
     totalFailed: 0,
     calendarId: null,
-    calendarName: calendarName
+    calendarName: calendarName,
+    calendarUrl: null
   };
 
   // Get or create the calendar first
@@ -364,11 +377,13 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
       totalCreated: 0,
       totalFailed: courses.length,
       calendarId: null,
-      calendarName: calendarName
+      calendarName: calendarName,
+      calendarUrl: null
     };
   }
 
   results.calendarId = calendarResult.calendarId;
+  results.calendarUrl = calendarResult.calendarUrl;
 
   // Create events in the calendar
   for (const course of courses) {
