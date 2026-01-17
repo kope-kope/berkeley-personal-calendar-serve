@@ -139,9 +139,19 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
       return res.status(400).json({ error: 'No image file provided' });
     }
 
+    // Debug: Log entire request body to see what's being received
+    console.log('Request body keys:', Object.keys(req.body));
+    console.log('Request body:', req.body);
+    
     // Get user email from request body (optional)
+    // Multer parses form fields into req.body when using multipart/form-data
     const userEmail = req.body.email;
     let user = null;
+    
+    console.log('Extract table request - email:', userEmail || 'not provided');
+    if (!userEmail) {
+      console.warn('⚠️ Email not provided in request body. FormData keys:', Object.keys(req.body));
+    }
     
     // Create or get user if email is provided
     if (userEmail) {
@@ -152,7 +162,10 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
         console.log('Continuing without user association');
       } else {
         user = userResult.data;
+        console.log('✓ User found/created:', user.id, userEmail);
       }
+    } else {
+      console.log('⚠ No email provided - extraction history will not be saved');
     }
 
     const imageBuffer = req.file.buffer;
@@ -214,6 +227,25 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
     let courses = [];
     let processedCourses = [];
     let matchResult = { success: false, data: { matchCount: 0, unmatchedCount: 0, unmatched: [] } };
+    let extractionId = null;
+    
+    // Save extraction history immediately (before processing) to get extractionId
+    if (user) {
+      const initialExtractionResult = await extractionsRepo.saveExtraction(
+        user.id,
+        { rawOpenAIResponse: text }, // Save raw response initially
+        'pending', // Status will be updated after processing
+        null,
+        null
+      );
+      
+      if (initialExtractionResult.success) {
+        extractionId = initialExtractionResult.data.id;
+        console.log('✓ Saved initial extraction history record:', extractionId);
+      } else {
+        console.error('Failed to save initial extraction history:', initialExtractionResult.error);
+      }
+    }
     
     try {
       // Try to parse JSON from the response
@@ -229,9 +261,6 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
       
       // Log the parsed courses data
       console.log('Parsed courses data:', JSON.stringify(courses, null, 2));
-      
-      // Note: Extraction history will be saved after matching and processing
-      // (saved below with the final processed courses)
 
       // Match extracted courses against database
       const courseNumbers = courses.map(c => c.courseNo).filter(Boolean);
@@ -410,6 +439,7 @@ app.post('/api/extract-table', upload.single('image'), async (req, res) => {
       const { error: updateError } = await supabase
         .from('extraction_history')
         .update({
+          extraction_status: 'success', // Update status to success
           extracted_data: {
             rawOpenAIResponse: courses, // Raw extraction from OpenAI
             processedCourses: processedCourses, // Processed/enriched courses

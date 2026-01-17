@@ -14,6 +14,12 @@ const { supabase } = require('../client');
  */
 async function addCourseToSchedule(userId, courseId, sessionId) {
   try {
+    console.log('[addCourseToSchedule] Attempting to add course to schedule:', {
+      userId,
+      courseId,
+      sessionId
+    });
+
     const { data: schedule, error } = await supabase
       .from('user_schedules')
       .insert({
@@ -25,14 +31,22 @@ async function addCourseToSchedule(userId, courseId, sessionId) {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('[addCourseToSchedule] Supabase error:', error);
+      console.error('[addCourseToSchedule] Error details:', JSON.stringify(error, null, 2));
+      throw error;
+    }
+
+    console.log('[addCourseToSchedule] ✓ Successfully created user_schedule:', schedule.id);
     return { success: true, data: schedule };
   } catch (error) {
     // Handle duplicate enrollment gracefully
     if (error.code === '23505') { // Unique constraint violation
+      console.log('[addCourseToSchedule] User already enrolled in this session');
       return { success: false, error: 'User already enrolled in this session' };
     }
-    console.error('Error in addCourseToSchedule:', error.message);
+    console.error('[addCourseToSchedule] Error in addCourseToSchedule:', error.message);
+    console.error('[addCourseToSchedule] Full error:', error);
     return { success: false, error: error.message };
   }
 }

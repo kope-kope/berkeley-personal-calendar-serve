@@ -348,18 +348,23 @@ async function createRecurringEvent(email, courseData, calendarId = 'primary') {
 }
 
 /**
- * Create multiple calendar events in batch
+ * Create or update multiple calendar events in batch (smart diff)
  * @param {string} email - User email
  * @param {Array<Object>} courses - Array of course data objects
  * @param {string} calendarName - Name of the calendar to create/use (default: "Spring 2026 schedule")
- * @returns {Promise<Object>} Results with created events and errors
+ * @returns {Promise<Object>} Results with created, updated, deleted events and errors
  */
 async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 schedule') {
   const results = {
     success: true,
     created: [],
+    updated: [],
+    deleted: [],
+    unchanged: false,
     failed: [],
     totalCreated: 0,
+    totalUpdated: 0,
+    totalDeleted: 0,
     totalFailed: 0,
     calendarId: null,
     calendarName: calendarName,
@@ -373,8 +378,12 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
       success: false,
       error: `Failed to create/get calendar: ${calendarResult.error}`,
       created: [],
+      updated: [],
+      deleted: [],
       failed: courses.map(c => ({ courseNo: c.courseNo, error: 'Calendar creation failed' })),
       totalCreated: 0,
+      totalUpdated: 0,
+      totalDeleted: 0,
       totalFailed: courses.length,
       calendarId: null,
       calendarName: calendarName,
@@ -385,8 +394,96 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
   results.calendarId = calendarResult.calendarId;
   results.calendarUrl = calendarResult.calendarUrl;
 
-  // Create events in the calendar
-  for (const course of courses) {
+  // Get existing events from the calendar
+  const existingEventsResult = await getExistingCalendarEvents(email, calendarResult.calendarId);
+  
+  if (!existingEventsResult.success) {
+    console.warn('Failed to get existing events, proceeding with creating new events:', existingEventsResult.error);
+  }
+
+  const existingSchedule = existingEventsResult.success ? existingEventsResult.data : [];
+  
+  // Compare schedules
+  const comparison = compareSchedules(existingSchedule, courses);
+  
+  // If schedules are identical, return early
+  if (comparison.identical) {
+    console.log('Schedule unchanged - no updates needed');
+    results.unchanged = true;
+    return results;
+  }
+
+  console.log(`Schedule comparison: ${comparison.removed.length} removed, ${comparison.changed.length} changed, ${comparison.new.length} new`);
+
+  // Delete removed courses
+  for (const removedCourse of comparison.removed) {
+    if (!removedCourse.eventId) {
+      console.warn(`No eventId for removed course ${removedCourse.courseNo}, skipping deletion`);
+      continue;
+    }
+
+    try {
+      const deleteResult = await deleteEvent(email, removedCourse.eventId, calendarResult.calendarId);
+      if (deleteResult.success) {
+        results.deleted.push({
+          courseNo: removedCourse.courseNo,
+          eventId: removedCourse.eventId
+        });
+        results.totalDeleted++;
+      } else {
+        results.failed.push({
+          courseNo: removedCourse.courseNo,
+          action: 'delete',
+          error: deleteResult.error
+        });
+        results.totalFailed++;
+      }
+    } catch (error) {
+      results.failed.push({
+        courseNo: removedCourse.courseNo,
+        action: 'delete',
+        error: error.message
+      });
+      results.totalFailed++;
+    }
+  }
+
+  // Update changed courses
+  for (const { existing, new: newCourseData } of comparison.changed) {
+    if (!existing.eventId) {
+      console.warn(`No eventId for changed course ${existing.courseNo}, skipping update`);
+      continue;
+    }
+
+    try {
+      const updateResult = await updateRecurringEvent(email, existing.eventId, newCourseData, calendarResult.calendarId);
+      if (updateResult.success) {
+        results.updated.push({
+          courseNo: newCourseData.courseNo,
+          eventId: updateResult.data.eventId,
+          htmlLink: updateResult.data.htmlLink
+        });
+        results.totalUpdated++;
+      } else {
+        results.failed.push({
+          courseNo: newCourseData.courseNo,
+          action: 'update',
+          error: updateResult.error
+        });
+        results.totalFailed++;
+      }
+    } catch (error) {
+      results.failed.push({
+        courseNo: newCourseData.courseNo,
+        action: 'update',
+        error: error.message
+      });
+      results.totalFailed++;
+    }
+  }
+
+  // Create new courses
+  for (const course of comparison.new) {
     try {
       const result = await createRecurringEvent(email, course, calendarResult.calendarId);
       
@@ -400,6 +497,7 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
       } else {
         results.failed.push({
           courseNo: course.courseNo,
+          action: 'create',
           error: result.error
         });
         results.totalFailed++;
@@ -407,6 +505,7 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
     } catch (error) {
       results.failed.push({
         courseNo: course.courseNo,
+        action: 'create',
         error: error.message
       });
       results.totalFailed++;
@@ -421,9 +520,10 @@ async function batchCreateEvents(email, courses, calendarName = 'Spring 2026 sch
  * Delete a calendar event
  * @param {string} email - User email
  * @param {string} eventId - Google Calendar event ID
+ * @param {string} calendarId - Calendar ID (defaults to 'primary')
  * @returns {Promise<Object>} Result
  */
-async function deleteEvent(email, eventId) {
+async function deleteEvent(email, eventId, calendarId = 'primary') {
   try {
     const clientResult = await getAuthenticatedClient(email);
     if (!clientResult.success) {
@@ -433,7 +533,7 @@ async function deleteEvent(email, eventId) {
     const calendar = google.calendar({ version: 'v3', auth: clientResult.client });
 
     await calendar.events.delete({
-      calendarId: 'primary',
+      calendarId: calendarId,
       eventId: eventId
     });
 
@@ -441,6 +541,275 @@ async function deleteEvent(email, eventId) {
   } catch (error) {
     console.error('Error deleting calendar event:', error);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get existing calendar events from a calendar
+ * @param {string} email - User email
+ * @param {string} calendarId - Calendar ID
+ * @returns {Promise<Object>} Array of existing events with course data extracted
+ */
+async function getExistingCalendarEvents(email, calendarId) {
+  try {
+    const clientResult = await getAuthenticatedClient(email);
+    if (!clientResult.success) {
+      return clientResult;
+    }
+
+    const calendar = google.calendar({ version: 'v3', auth: clientResult.client });
+
+    // Fetch all events from the calendar
+    const response = await calendar.events.list({
+      calendarId: calendarId,
+      maxResults: 2500, // Max allowed by Google Calendar API
+      singleEvents: false // Get recurring events as series
+    });
+
+    const events = response.data.items || [];
+    
+    // Extract course data from events
+    const existingCourses = events.map(event => {
+      // Extract course number from summary (format: "MBA210B-1 - Course Title")
+      const summaryMatch = event.summary?.match(/^([A-Z0-9\-\.]+)\s*-\s*(.+)$/);
+      const courseNo = summaryMatch ? summaryMatch[1] : null;
+      
+      // Extract course details from description
+      const description = event.description || '';
+      const instructorMatch = description.match(/Instructor:\s*(.+)/);
+      const courseMatch = description.match(/Course:\s*(.+)/);
+      const datesMatch = description.match(/Dates:\s*(.+?)\s+to\s+(.+)/);
+      
+      // Parse recurrence to get days
+      let days = [];
+      if (event.recurrence && event.recurrence[0]) {
+        const byDayMatch = event.recurrence[0].match(/BYDAY=([A-Z,]+)/);
+        if (byDayMatch) {
+          const dayAbbrs = byDayMatch[1].split(',');
+          const dayMap = { 'MO': 'Monday', 'TU': 'Tuesday', 'WE': 'Wednesday', 'TH': 'Thursday', 'FR': 'Friday', 'SA': 'Saturday', 'SU': 'Sunday' };
+          days = dayAbbrs.map(abbr => dayMap[abbr] || abbr);
+        }
+      }
+      
+      // Parse start/end times
+      let times = null;
+      if (event.start?.dateTime && event.end?.dateTime) {
+        const startTime = new Date(event.start.dateTime);
+        const endTime = new Date(event.end.dateTime);
+        const startStr = `${startTime.getHours().toString().padStart(2, '0')}:${startTime.getMinutes().toString().padStart(2, '0')}`;
+        const endStr = `${endTime.getHours().toString().padStart(2, '0')}:${endTime.getMinutes().toString().padStart(2, '0')}`;
+        times = `${startStr}-${endStr}`;
+      }
+
+      return {
+        courseNo: courseNo,
+        courseTitle: summaryMatch ? summaryMatch[2] : event.summary || '',
+        instructor: instructorMatch ? instructorMatch[1].trim() : null,
+        location: event.location || null,
+        days: days,
+        times: times,
+        startDate: datesMatch ? datesMatch[1].trim() : null,
+        endDate: datesMatch ? datesMatch[2].trim() : null,
+        eventId: event.id,
+        htmlLink: event.htmlLink
+      };
+    }).filter(course => course.courseNo); // Filter out events that don't have course numbers
+
+    return {
+      success: true,
+      data: existingCourses
+    };
+  } catch (error) {
+    console.error('Error getting existing calendar events:', error);
+    return { success: false, error: error.message, data: [] };
+  }
+}
+
+/**
+ * Compare two schedules to find differences
+ * @param {Array<Object>} existingSchedule - Array of existing course objects
+ * @param {Array<Object>} newSchedule - Array of new course objects
+ * @returns {Object} Comparison result with identical, removed, changed, and new courses
+ */
+function compareSchedules(existingSchedule, newSchedule) {
+  // Normalize both schedules for comparison
+  const normalizeForComparison = (course) => {
+    return {
+      courseNo: (course.courseNo || '').trim(),
+      courseTitle: (course.courseTitle || '').trim(),
+      days: Array.isArray(course.days) ? course.days.sort().join(',') : (course.days || ''),
+      times: (course.times || '').trim(),
+      startDate: (course.startDate || '').trim(),
+      endDate: (course.endDate || '').trim(),
+      location: (course.location || '').trim(),
+      instructor: (course.instructor || '').trim()
+    };
+  };
+
+  const normalizedExisting = existingSchedule.map(normalizeForComparison);
+  const normalizedNew = newSchedule.map(normalizeForComparison);
+
+  // Create maps for quick lookup
+  const existingMap = new Map();
+  normalizedExisting.forEach((course, index) => {
+    existingMap.set(course.courseNo, { normalized: course, original: existingSchedule[index] });
+  });
+
+  const newMap = new Map();
+  normalizedNew.forEach((course, index) => {
+    newMap.set(course.courseNo, { normalized: course, original: newSchedule[index] });
+  });
+
+  // Find removed, changed, and new courses
+  const removed = [];
+  const changed = [];
+  const newCourses = [];
+
+  // Check existing courses
+  existingMap.forEach((existing, courseNo) => {
+    const newCourse = newMap.get(courseNo);
+    if (!newCourse) {
+      // Course was removed
+      removed.push(existing.original);
+    } else {
+      // Compare all fields
+      const existingNorm = existing.normalized;
+      const newNorm = newCourse.normalized;
+      
+      if (existingNorm.courseTitle !== newNorm.courseTitle ||
+          existingNorm.days !== newNorm.days ||
+          existingNorm.times !== newNorm.times ||
+          existingNorm.startDate !== newNorm.startDate ||
+          existingNorm.endDate !== newNorm.endDate ||
+          existingNorm.location !== newNorm.location ||
+          existingNorm.instructor !== newNorm.instructor) {
+        // Course has changed - include original event info for update
+        changed.push({
+          existing: existing.original,
+          new: newCourse.original
+        });
+      }
+    }
+  });
+
+  // Find new courses
+  newMap.forEach((newCourse, courseNo) => {
+    if (!existingMap.has(courseNo)) {
+      newCourses.push(newCourse.original);
+    }
+  });
+
+  const identical = removed.length === 0 && changed.length === 0 && newCourses.length === 0;
+
+  return {
+    identical,
+    removed,
+    changed,
+    new: newCourses
+  };
+}
+
+/**
+ * Update an existing recurring calendar event
+ * @param {string} email - User email
+ * @param {string} eventId - Google Calendar event ID
+ * @param {Object} courseData - Updated course data
+ * @param {string} calendarId - Calendar ID
+ * @returns {Promise<Object>} Updated event or error
+ */
+async function updateRecurringEvent(email, eventId, courseData, calendarId) {
+  try {
+    const clientResult = await getAuthenticatedClient(email);
+    if (!clientResult.success) {
+      return clientResult;
+    }
+
+    const calendar = google.calendar({ version: 'v3', auth: clientResult.client });
+
+    // Parse course data (same as createRecurringEvent)
+    const {
+      courseNo,
+      courseTitle,
+      instructor,
+      location,
+      startDate,
+      endDate,
+      days,
+      times,
+      dbTime,
+      notes
+    } = courseData;
+
+    // Determine days array
+    const daysArray = Array.isArray(days) ? days : (days ? [days] : ['Monday']);
+    
+    // Parse time
+    const timeString = times || dbTime || '09:00-10:00';
+    const { startHour, startMinute, endHour, endMinute } = parseTimeString(timeString);
+
+    // Calculate first occurrence
+    const firstOccurrenceDate = calculateFirstOccurrence(startDate, daysArray);
+    
+    // Format datetime strings in LA timezone
+    const eventStartDateTime = formatDateTimeInLA(firstOccurrenceDate, startHour, startMinute);
+    const eventEndDateTime = formatDateTimeInLA(firstOccurrenceDate, endHour, endMinute);
+
+    // Build RRULE
+    const byDay = daysArray.map(dayToRRule).join(',');
+    const until = formatRRuleUntil(endDate);
+    const rrule = `RRULE:FREQ=WEEKLY;BYDAY=${byDay};UNTIL=${until}`;
+
+    // Build updated event object
+    const updatedEvent = {
+      summary: `${courseNo} - ${courseTitle}`,
+      location: location || 'Room TBD',
+      description: [
+        `Instructor: ${instructor || 'TBD'}`,
+        `Course: ${courseNo}`,
+        `Dates: ${startDate} to ${endDate}`,
+        notes ? `Notes: ${notes}` : ''
+      ].filter(Boolean).join('\n'),
+      start: {
+        dateTime: eventStartDateTime,
+        timeZone: 'America/Los_Angeles'
+      },
+      end: {
+        dateTime: eventEndDateTime,
+        timeZone: 'America/Los_Angeles'
+      },
+      recurrence: [rrule],
+      reminders: {
+        useDefault: true
+      }
+    };
+
+    console.log(`Updating calendar event ${eventId}:`, JSON.stringify(updatedEvent, null, 2));
+
+    const response = await calendar.events.update({
+      calendarId: calendarId,
+      eventId: eventId,
+      resource: updatedEvent
+    });
+
+    console.log(`Event updated: ${eventId}`);
+
+    return {
+      success: true,
+      data: {
+        eventId: response.data.id,
+        htmlLink: response.data.htmlLink,
+        summary: response.data.summary,
+        start: response.data.start,
+        end: response.data.end
+      }
+    };
+  } catch (error) {
+    console.error('Error updating calendar event:', error);
+    return { 
+      success: false, 
+      error: error.message,
+      details: error.response?.data?.error || null
+    };
   }
 }
 
@@ -620,6 +989,9 @@ module.exports = {
   createRecurringEvent,
   batchCreateEvents,
   deleteEvent,
+  getExistingCalendarEvents,
+  compareSchedules,
+  updateRecurringEvent,
   generateICSContent,
   normalizeCourse,
   generateEventPreview

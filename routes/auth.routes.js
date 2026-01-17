@@ -75,13 +75,33 @@ router.get('/google/callback', async (req, res) => {
     // Exchange code for tokens
     const { tokens } = await oauth2Client.getToken(code);
     
+    // Set tokens to get user info from Google
+    oauth2Client.setCredentials(tokens);
+    
+    // Get user email from Google OAuth (verify it matches what user entered)
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    let googleEmail = email; // Fallback to provided email
+    
+    try {
+      const userInfo = await oauth2.userinfo.get();
+      if (userInfo.data && userInfo.data.email) {
+        googleEmail = userInfo.data.email;
+        console.log('✓ Retrieved email from Google OAuth:', googleEmail);
+      }
+    } catch (err) {
+      console.warn('Failed to get email from Google OAuth, using provided email:', err.message);
+    }
+    
+    // Use email from Google if available, otherwise use provided email
+    const finalEmail = googleEmail || email;
+    
     // Calculate token expiry
     const tokenExpiry = tokens.expiry_date 
       ? new Date(tokens.expiry_date).toISOString()
       : new Date(Date.now() + 3600 * 1000).toISOString(); // Default 1 hour
 
-    // Store tokens in database
-    const result = await usersRepo.updateGoogleTokens(email, {
+    // Store tokens in database using the email from Google
+    const result = await usersRepo.updateGoogleTokens(finalEmail, {
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
       token_expiry: tokenExpiry
@@ -92,8 +112,8 @@ router.get('/google/callback', async (req, res) => {
       return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3003'}?auth=error&message=Failed to save credentials`);
     }
 
-    // Redirect to frontend with success
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?auth=success&email=${encodeURIComponent(email)}`);
+    // Redirect to frontend with success (use email from Google if different)
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?auth=success&email=${encodeURIComponent(finalEmail)}`);
 
   } catch (error) {
     console.error('OAuth callback error:', error);

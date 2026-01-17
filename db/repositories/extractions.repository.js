@@ -16,6 +16,13 @@ const { supabase } = require('../client');
  */
 async function saveExtraction(userId, extractedData, status, errorMessage = null, imageUrl = null) {
   try {
+    console.log('[saveExtraction] Attempting to save extraction:', {
+      userId,
+      status,
+      hasData: !!extractedData,
+      dataType: typeof extractedData
+    });
+
     const coursesCount = Array.isArray(extractedData) ? extractedData.length : 0;
 
     const { data: extraction, error } = await supabase
@@ -31,10 +38,17 @@ async function saveExtraction(userId, extractedData, status, errorMessage = null
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('[saveExtraction] Supabase error:', error);
+      console.error('[saveExtraction] Error details:', JSON.stringify(error, null, 2));
+      throw error;
+    }
+
+    console.log('[saveExtraction] ✓ Successfully saved extraction:', extraction.id);
     return { success: true, data: extraction };
   } catch (error) {
-    console.error('Error in saveExtraction:', error.message);
+    console.error('[saveExtraction] Error in saveExtraction:', error.message);
+    console.error('[saveExtraction] Full error:', error);
     return { success: false, error: error.message };
   }
 }
