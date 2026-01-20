@@ -165,6 +165,8 @@ function generateCalendarEventsEmail(userEmail, events, calendarName, calendarUr
     <a href="https://kwaraetf.org/donations/kwaraetf/" style="display: inline-block; padding: 12px 24px; background-color: #000; color: white; text-decoration: none; border-radius: 5px;">Donate to Kwara ETF</a>
   </p>
   
+  <p>If you're unable to donate through the link above, just reply to this email and I'll send you my Venmo or Zelle link.</p>
+  
   <p>And hey—if you donate, find me on campus. I owe you a genuine hug and probably a thank you coffee ☕</p>
   
   <p>No pressure at all. Just wanted to loop you in on something that shaped my story.</p>
@@ -186,6 +188,8 @@ Scholarships from this fund are literally why I can be a Haasie today.
 If you can spare even a small donation, you'd be keeping that door open for bright kids who just need a chance.
 
 Donate here: https://kwaraetf.org/donations/kwaraetf/
+
+If you're unable to donate through the link above, just reply to this email and I'll send you my Venmo or Zelle link.
 
 And hey—if you donate, find me on campus. I owe you a genuine hug and probably a thank you coffee ☕
 

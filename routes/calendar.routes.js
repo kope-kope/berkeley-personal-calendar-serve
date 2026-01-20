@@ -239,52 +239,95 @@ router.post('/events', async (req, res) => {
     const hasChanges = result.totalCreated > 0 || result.totalUpdated > 0 || result.totalDeleted > 0;
     if (result.success && hasChanges) {
       try {
-        // Generate email content with all changed courses
-        const allChangedCourses = [
-          ...result.created.map(c => ({ ...c, action: 'created' })),
-          ...result.updated.map(c => ({ ...c, action: 'updated' })),
-          ...result.deleted.map(c => ({ ...c, action: 'deleted' }))
-        ];
+        // Check if email has already been sent to this user
+        // Always check both donation_email_sent flag AND donation_tracking table
+        // (checking both ensures we catch emails sent even if the flag wasn't updated)
         
-        const emailContent = gmailService.generateCalendarEventsEmail(
-          email,
-          allChangedCourses.map(eventInfo => ({
-            courseNo: eventInfo.courseNo,
-            courseData: validCourses.find(c => c.courseNo === eventInfo.courseNo)
-          })),
-          result.calendarName || 'Spring 2026 schedule',
-          result.calendarUrl || ''
-        );
+        // First, refresh user data to get latest donation_email_sent status
+        const { data: freshUser, error: userError } = await supabase
+          .from('users')
+          .select('donation_email_sent')
+          .eq('id', user.id)
+          .single();
+        
+        const emailAlreadySent = freshUser?.donation_email_sent || false;
+        
+        // Always check donation_tracking table (regardless of flag status)
+        const { data: existingTracking, error: checkError } = await supabase
+          .from('donation_tracking')
+          .select('id')
+          .eq('user_id', user.id)
+          .limit(1);
+        
+        const hasExistingDonationTracking = existingTracking && existingTracking.length > 0;
+        
+        if (checkError && checkError.code !== 'PGRST116') {
+          console.error('Error checking donation tracking:', checkError);
+        }
 
-        // Send email asynchronously (don't block response)
-        gmailService.sendEmail(email, emailContent.subject, emailContent.htmlBody, true)
-          .then(async (emailResult) => {
-            if (emailResult.success) {
-              console.log(`Confirmation email sent successfully to ${email}`);
-              
-              // Save donation tracking record
-              try {
-                const { error: trackingError } = await supabase.from('donation_tracking').insert({
-                  user_id: user.id,
-                  email_sent_at: new Date().toISOString(),
-                  campaign_id: 'calendar_events_confirmation'
-                });
+        if (emailAlreadySent || hasExistingDonationTracking) {
+          console.log(`📧 Email already sent to ${email} - skipping duplicate email send`);
+          console.log(`   Flag check: ${emailAlreadySent}, DB check: ${hasExistingDonationTracking}`);
+        } else {
+          // Generate email content with all changed courses
+          const allChangedCourses = [
+            ...result.created.map(c => ({ ...c, action: 'created' })),
+            ...result.updated.map(c => ({ ...c, action: 'updated' })),
+            ...result.deleted.map(c => ({ ...c, action: 'deleted' }))
+          ];
+          
+          const emailContent = gmailService.generateCalendarEventsEmail(
+            email,
+            allChangedCourses.map(eventInfo => ({
+              courseNo: eventInfo.courseNo,
+              courseData: validCourses.find(c => c.courseNo === eventInfo.courseNo)
+            })),
+            result.calendarName || 'Spring 2026 schedule',
+            result.calendarUrl || ''
+          );
+
+          // Send email asynchronously (don't block response)
+          gmailService.sendEmail(email, emailContent.subject, emailContent.htmlBody, true)
+            .then(async (emailResult) => {
+              if (emailResult.success) {
+                console.log(`📧 Confirmation email sent successfully to ${email}`);
                 
-                if (trackingError) {
-                  console.error('Failed to save donation tracking record:', trackingError);
-                } else {
-                  console.log('✓ Saved donation tracking record');
+                // Mark user as having received email
+                try {
+                  const markResult = await usersRepo.markDonationEmailSent(user.id);
+                  if (markResult.success) {
+                    console.log(`✓ Marked user as having received donation email`);
+                  } else {
+                    console.error('Failed to mark donation email as sent:', markResult.error);
+                  }
+                } catch (markError) {
+                  console.error('Error marking donation email as sent:', markError);
                 }
-              } catch (trackingErr) {
-                console.error('Error saving donation tracking:', trackingErr);
+                
+                // Save donation tracking record
+                try {
+                  const { error: trackingError } = await supabase.from('donation_tracking').insert({
+                    user_id: user.id,
+                    email_sent_at: new Date().toISOString(),
+                    campaign_id: 'calendar_events_confirmation'
+                  });
+                  
+                  if (trackingError) {
+                    console.error('Failed to save donation tracking record:', trackingError);
+                  } else {
+                    console.log('✓ Saved donation tracking record');
+                  }
+                } catch (trackingErr) {
+                  console.error('Error saving donation tracking:', trackingErr);
+                }
+              } else {
+                console.error(`Failed to send confirmation email to ${email}:`, emailResult.error);
               }
-            } else {
-              console.error(`Failed to send confirmation email to ${email}:`, emailResult.error);
-            }
-          })
-          .catch(emailError => {
-            console.error(`Error sending confirmation email to ${email}:`, emailError);
-          });
+            })
+            .catch(emailError => {
+              console.error(`Error sending confirmation email to ${email}:`, emailError);
+            });
+        }
       } catch (emailError) {
         // Log error but don't fail the request
         console.error('Error preparing email:', emailError);
