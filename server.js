@@ -521,6 +521,10 @@ app.listen(PORT, async () => {
   console.log('Testing database connection...');
   const connected = await testConnection();
   if (!connected) {
-    console.warn('⚠️  Warning: Database connection failed. Please check your Supabase credentials.');
+    const host = (process.env.SUPABASE_URL || '(unset)').replace(/^https?:\/\//, '');
+    console.warn('⚠️  Warning: Database connection FAILED — the server is running but every DB call will error with "fetch failed".');
+    console.warn(`   Target: ${host}`);
+    console.warn('   Likely causes: Supabase project paused/deleted (host stops resolving), or wrong SUPABASE_URL/SUPABASE_SERVICE_KEY.');
+    console.warn('   Check the project status at https://supabase.com/dashboard');
   }
 }); 
